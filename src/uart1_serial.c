@@ -2,6 +2,10 @@
 #define PC_ARCH
 #endif
 
+#if defined(TEST) || defined(PC_ARCH)
+#include <stdio.h>
+#endif
+
 #ifdef __XC32
 #include <plib.h>
 #endif
@@ -10,20 +14,20 @@
 #include <xc.h>
 #include "uart.h"
 #include "delay.h"
-#include "uart1_serial.h"
 #endif
 
 #ifdef TEST
-#include <stdio.h>
 #include <pthread.h>
 #include <unistd.h>
 #include <windows.h>
 #endif
 
 #ifdef PC_ARCH
-#include <stdio.h>
 #include "serialport.h"
 #endif
+
+#include "uart1_serial.h"
+
 
 #define SERIAL_READ_BUF 80  //byte
 #define SERIAL_SLEEP 1000     //[ms]
