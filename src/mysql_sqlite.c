@@ -128,6 +128,7 @@ HDBCOL mydb_prepare(HDBSQL hdb, const char* str)
 	if (mysql_query((MYSQL*)hdb, str)) {
 		//error
 		free(ret);
+		ret=NULL;
 		goto end;
 	}
 	((struct hdb*)ret)->resp=(HDBCOL)mysql_use_result((MYSQL*)hdb);
