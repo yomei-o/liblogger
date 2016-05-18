@@ -138,12 +138,18 @@ static int dualsock_create(const char* hostname, int port)
 static void mystrlwr(char*key)
 {
 	if (key == NULL)return;
-	while (*key)*key++ = tolower(*key);
+	while (*key){
+		*key = tolower(*key);
+		key++;
+	}
 }
 static void mystrupr(char*key)
 {
 	if (key == NULL)return;
-	while (*key)*key++ = toupper(*key);
+	while (*key){
+		*key = toupper(*key);
+		key++;
+	}
 }
 
 
