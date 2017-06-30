@@ -61,6 +61,7 @@ either expressed or implied, of the FreeBSD Project.
 #define closesocket(s) close(s)
 #endif	/* unix */
 
+#define MY_SOCKET_TIMEOUT (30*1000)
 //
 // init
 //
@@ -94,6 +95,30 @@ void myhttp_done()
 //
 
 
+static void setsockopt_timeout(int fd, int tt)
+{
+	int timeout = tt;
+	int ret;
+	struct timeval tv;
+
+	tv.tv_sec = tt / 1000;
+	tv.tv_usec = (tt % 1000) * 1000;
+#if defined(_WIN32) || defined(__CYGWIN__)
+	ret = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (char*)&tt, (socklen_t) sizeof(tt));
+#endif	
+#ifdef unix
+	ret = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (char*)&tv, (socklen_t) sizeof(tv));
+#endif
+	tv.tv_sec = tt / 1000;
+	tv.tv_usec = (tt % 1000) * 1000;
+#if defined(_WIN32) || defined(__CYGWIN__)
+	ret = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (char*)&tt, (socklen_t)sizeof(tt));
+#endif
+#ifdef unix
+	ret = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (char*)&tv, (socklen_t)sizeof(tv));
+#endif	
+}
+
 static int dualsock_create(const char* hostname, int port)
 {
 	int sockfd;
@@ -104,7 +129,7 @@ static int dualsock_create(const char* hostname, int port)
 	char service[16];
 
 	memset(&hints, 0, sizeof(hints));
-	hints.ai_family = AF_UNSPEC;     // IPv4/IPv6—¼‘Î‰ž
+	hints.ai_family = AF_UNSPEC;     // IPv4/IPv6ä¸¡å¯¾å¿œ
 	hints.ai_socktype = SOCK_STREAM;
 	hints.ai_flags = AI_NUMERICSERV;
 
@@ -242,18 +267,6 @@ static int get_location(const char* url, char *server, int sz)
 // recv
 //
 
-static int recv_sz(int fd, void* buf, int sz)
-{
-	int ret, read = 0;
-	while (1) {
-		ret = recv(fd, (char*)buf + read, sz, 0);
-		if (ret < 1)return read;
-		sz -= ret;
-		read += ret;
-		if (sz == 0)return read;
-	}
-}
-
 static int recv_until(int fd, char* buf, int sz, int endch)
 {
 	int ret = 0, r;
@@ -268,6 +281,59 @@ static int recv_until(int fd, char* buf, int sz, int endch)
 	}
 	return ret;
 }
+
+static int recv_sz(int fd, void* buf, int sz)
+{
+	int ret, read = 0;
+	while (1) {
+		ret = recv(fd, (char*)buf + read, sz, 0);
+		if (ret < 1)return read;
+		sz -= ret;
+		read += ret;
+		if (sz == 0)return read;
+	}
+}
+
+static int recv_sz_null(int fd, int sz)
+{
+	char buf[1024];
+	int ret = 0, r;
+
+	if (fd == -1)return -1;
+	while (sz) {
+		r = recv(fd, buf, sizeof(buf), 0);
+		if (r <1)return ret;
+		ret += r;
+		sz -= r;
+	}
+	return ret;
+}
+
+static int recv_sz_callback(int fd, long long sz, void*vp, int(*f)(void*vp, void*data, int sz))
+{
+	int ret, read = 0,ret2;
+	char buf[1024 * 64];
+	long long bsz;
+
+	if (f == NULL)return -1;
+
+	while (1) {
+		bsz = sizeof(buf);
+		if (sz < bsz)bsz = sz;
+
+		ret = recv(fd, buf,(int)bsz, 0);
+		if (ret < 1)return read;
+		sz -= ret;
+		read += ret;
+
+
+		ret2=f(vp, buf, ret);
+		if (ret2 < ret)return read;
+
+		if (sz == 0)return read;
+	}
+}
+
 
 
 static int recv_chunked(int fd, void* vp, int max_sz)
@@ -297,6 +363,62 @@ static int recv_chunked(int fd, void* vp, int max_sz)
 	return ret;
 }
 
+static int recv_chunked_null(int fd, int max_sz)
+{
+	int ret = 0;
+	int rd, sz;
+	char buf[256];
+	while (max_sz) {
+		buf[0] = 0;
+		sz = 0;
+		rd = recv_until(fd, buf, sizeof(buf), '\n');
+		if (rd < 1)break;
+		sscanf(buf, "%x", &sz);
+		if (sz == 0) {
+			rd = recv_until(fd, buf, sizeof(buf), '\n');
+			break;
+		}
+		if (sz < 1)break;
+		if (max_sz < sz)break;
+		rd = recv_sz_null(fd, sz);
+		if (rd < 1)break;
+		ret += rd;
+		max_sz -= rd;
+		rd = recv_until(fd, buf, sizeof(buf), '\n');
+		if (rd < 1)break;
+	}
+	return ret;
+}
+
+static int recv_chunked_callback(int fd, long long max_sz, void* vp, int(*f)(void*vp, void* data, int sz))
+{
+	int ret = 0;
+	int rd, sz;
+	char buf[256];
+
+	if (f == NULL)return -1;
+
+	while (max_sz) {
+		buf[0] = 0;
+		sz = 0;
+		rd = recv_until(fd, buf, sizeof(buf), '\n');
+		if (rd < 1)break;
+		sscanf(buf, "%x", &sz);
+		if (sz == 0) {
+			rd = recv_until(fd, buf, sizeof(buf), '\n');
+			break;
+		}
+		if (sz < 1)break;
+		if (max_sz < sz)break;
+		rd = recv_sz_callback(fd, sz,vp,f);
+		if (rd < 1)break;
+		ret += rd;
+		max_sz -= rd;
+		rd = recv_until(fd, buf, sizeof(buf), '\n');
+		if (rd < 1)break;
+	}
+	return ret;
+}
 
 static int recv_null(int fd)
 {
@@ -312,20 +434,6 @@ static int recv_null(int fd)
 	return ret;
 }
 
-static int recv_sz_null(int fd, int sz)
-{
-	char buf[1024];
-	int ret = 0, r;
-
-	if (fd == -1)return -1;
-	while (sz) {
-		r = recv(fd, buf, sizeof(buf), 0);
-		if (r <1)return ret;
-		ret += r;
-		sz -= r;
-	}
-	return ret;
-}
 
 //
 //
@@ -378,9 +486,9 @@ static int myhttp_get_data__(const char* url, void** data, int* sz, int* rescode
 
 	if (s == -1)return ret;
 
+	setsockopt_timeout(s, MY_SOCKET_TIMEOUT);
 	//printf("connect!!\n");
 	//printf("%s", tmp);
-
 	wri = send(s, tmp, strlen(tmp), 0);
 	if (wri < 1) {
 		closesocket(s);
@@ -494,6 +602,176 @@ int myhttp_get_data(const char* url, void** data, int* sz, int* rescode)
 	return myhttp_get_data__(url, data, sz, rescode, 0);
 }
 
+static int myhttp_get_data_callback__(const char* url,long long *sz,int* rescode,void* vp, int (*f)(void* vp,void* data,int sz),int ct )
+{
+	int ret = -1;
+	int port = 80;
+	char server[256];
+	char loc[256];
+	char redirect[1024 * 2];
+	char tmp[1024 * 2];
+	char key[1024];
+	char val[1024];
+	char* p;
+
+	int s;
+	
+	int st,wri;
+
+	long long read,clen = -1;
+	long long  chunk = 0;
+
+	if (url == NULL || f==NULL)return ret;
+	if (ct >= 10)return -1;
+
+	if (strlen(url)>800)return ret;
+
+
+	if (is_http(url) == 0)return ret;
+	port = get_port(url);
+	get_server(url, server, sizeof(server));
+	get_location(url, loc, sizeof(loc));
+
+	if (server[0] == 0 || loc[0] == 0)return ret;
+
+	//printf("port=%d\n",port);
+	//printf("server=>>%s<<\n", server);
+	//printf("dir=>>%s<<\n", loc);
+	//printf("\n");
+
+
+	sprintf(tmp, "GET %s HTTP/1.1\r\n"
+		"Host: %s\r\n"
+		"Connection: close\r\n"
+		"\r\n"
+		, loc, server);
+
+	s = dualsock_create(server, port);
+
+	if (s == -1)return ret;
+
+	setsockopt_timeout(s, MY_SOCKET_TIMEOUT);
+
+	//printf("connect!!\n");
+	//printf("%s", tmp);
+
+	wri = send(s, tmp, strlen(tmp), 0);
+	if (wri < 1) {
+		closesocket(s);
+		return ret;
+	}
+	read = recv_until(s, tmp, sizeof(tmp), '\n');
+	if (read < 1) {
+		closesocket(s);
+		return ret;
+	}
+	//printf("%s",tmp);
+
+	st = 0;
+	sscanf(tmp, "%*s%d", &st);
+
+	redirect[0] = 0;
+
+	while (1) {
+		read = recv_until(s, tmp, sizeof(tmp), '\n');
+		if (read < 1)break;
+		if (tmp[0] == '\r' || tmp[0] == '\n')break;
+		p = strchr(tmp, ':');
+		if (p == NULL)continue;
+
+		//printf("%s", tmp);
+
+		*p = 0;
+		p++;
+		key[0] = 0;
+		val[0] = 0;
+		sscanf(tmp, "%s", key);
+		sscanf(p, "%s", val);
+		mystrupr(key);
+		if (strcmp(key, "LOCATION") == 0) {
+			strcpy(redirect, val);
+		}
+		else if (strcmp(key, "CONTENT-LENGTH") == 0) {
+			sscanf(val, "%lld", &clen);
+		}
+		else if (strcmp(key, "TRANSFER-ENCODING") == 0) {
+			strcpy(redirect, val);
+			if (strstr(val, "chunked"))chunk = 1;
+		}
+	}
+	if (read < 1) {
+		closesocket(s);
+		return ret;
+	}
+	
+	if(rescode)*rescode = st;
+	if (clen < 0)clen = 1024 * 1024 - 100;
+	ret = 0;
+
+	//printf("body\n");
+	if (rescode)*rescode = st;
+
+
+	read = 0;
+	if (st >= 200 && st<300){
+		if (clen > 0) {
+			if (chunk) {
+				read = recv_chunked_callback(s, clen, vp, f);
+			}
+			else {
+				read = recv_sz_callback(s, clen, vp, f);
+			}
+		}
+	}
+	else{
+		if (clen > 0) {
+			if (chunk) {
+				read = recv_chunked_null(s,(int)clen);
+			}
+			else {
+				read = recv_sz_null(s,(int)clen);
+			}
+		}
+	}
+
+	if (sz)*sz = read;
+
+
+	if (st >= 300 && st <= 399) {
+		closesocket(s);
+
+		if (redirect[0] == 0 || strlen(redirect) > 500 || strlen(loc)>500 || strlen(server)>500) {
+			return ret;
+		}
+		if (strstr(redirect, "http://") == NULL) {
+			if (redirect[0] == '/') {
+				strcpy(tmp, redirect);
+				sprintf(redirect, "http://%s:%d%s", server, port, tmp);
+			}
+			else {
+				strcpy(tmp, redirect);
+				sprintf(redirect, "http://%s:%d%s", server, port, loc);
+				p = strrchr(redirect, '/');
+				if (p) {
+					p++;
+					*p = 0;
+					strcat(redirect, tmp);
+				}
+			}
+		}
+		ret = myhttp_get_data_callback__(redirect, sz,rescode,vp,f, ct + 1);
+		return ret;
+	}
+	closesocket(s);
+	ret = 0;
+	return ret;
+}
+
+int myhttp_get_data_callback(const char* url,long long *sz,int* rescode,void* vp,int (*f)(void*vp,void* data,int sz))
+{
+	return myhttp_get_data_callback__(url,sz,rescode,vp,f,0);
+}
+
 static int myhttp_post_data__(const char* url, void* sdata, int ssz, const char* ctype, void** data, int* sz, int* rescode, int ct)
 {
 	int ret = -1;
@@ -543,6 +821,8 @@ static int myhttp_post_data__(const char* url, void* sdata, int ssz, const char*
 	s = dualsock_create(server, port);
 
 	if (s == -1)return ret;
+
+	setsockopt_timeout(s, MY_SOCKET_TIMEOUT);
 
 	//printf("connect!!\n");
 	//printf("%s", tmp);
@@ -677,7 +957,8 @@ void myhttp_free_data(void* vp)
 
 
 
-#ifdef _CONSOLE
+//#ifdef _CONSOLE
+#if 0
 
 int main()
 {
@@ -704,7 +985,7 @@ int main()
 
 	//ret = myhttp_post_data("http://127.0.0.1/test/happy/nph-connection-check.exe", "1234567890",10,"application/octet-steram",&data, &sz, &res);
 	//ret = myhttp_get_data("http://127.0.0.1/test/happy/checklogin.exe",  &data, &sz, &res);
-	ret = myhttp_get_data("http://127.0.0.1:11228/301/aaa", &data, &sz, &res);
+	ret = myhttp_get_data("http://127.0.0.1:12345/", &data, &sz, &res);
 	printf(">>%s<<\n", (char*)data);
 
 	myhttp_free_data(data);
